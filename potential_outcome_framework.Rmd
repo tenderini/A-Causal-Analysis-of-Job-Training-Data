@@ -1,0 +1,656 @@
+---
+title: "A Causal Analysis of Job Training Data"
+author: "Alessandro Ciancetta, Alessandro Tenderini & Joule Voelz"
+date: "2023-03-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+<br><br>
+
+# Abstract
+
+In this project, we analyze data from the National Supported Work (NSW) program to try to learn the causal effect of the program on income. We treat the data as a random experiment and employ three different approaches for causal inference: Neyman's estimator, Fisher's exact test, and a Bayesian parametric approach. All three estimates indicate that the program had a positive effect on earnings of over 500 dollars but not exceeding 3,000 dollars.
+
+# Introduction
+
+In this project, we will attempt to learn the causal effect on earnings of a job training program, the National Supported Work (NSW) program. This data was first analyzed by Lalonde (1986) and features frequently in research on econometrics. We will analyze the data using three approaches: Neyman's estimator of the average treatment effect (ATE), Fisher's exact test, and a model-based imputation approach.
+
+According to Lalonde, the NSW was a "temporary employment program designed to help disadvantaged workers lacking basic job skills move into the labor market by giving them work experience and counseling in a sheltered environment." The NSW assigned qualified applicants to training positions randomly, while the control group were not given access to the program. Because the NSW was targeted at a self-selecting group of disadvantaged workers, it cannot be generalized to the entire population using this data alone. However, because the treatments were randomized, we can consider it a randomized experiment among the subset of the population represented in the study.
+
+<br><br>
+
+# 1. Exploratory Data Analysis
+
+```{r message=FALSE, warning=FALSE}
+lalonde <- read.csv("LalondeDataByDehejiaWahba.csv")
+library(mvtnorm)      # Multivariate Normal and t distributions
+library(kableExtra)   # Tables for RMarkdown
+library(dplyr)
+```
+
+
+## 1.1 Data summary
+
+We begin by summarizing the data. The variables in the data represent the following. Background characteristics include `age`, years of `education`, whether they were now or ever before `married`, whether they were high school dropouts (`nodegr`), and whether they were `black` or `hispanic`. There are two measures of real income for 1974-1975, the two years before the training program (`re74` and `re75`), as well as indicators for whether they were unemployed in those years, respectively (`u74` and `u75`). The treatment variable `treat` equals 1 if the workers were assigned to the program and equals 0 if not. The outcome of interest is `re78`, the worker's real earnings in 1978.
+
+We can see from summary statistics that the average subject of the study was 25 years of age and completed 10 years of schooling. 78\% did not finish high school. More than 73\% were unemployed in 1974, and over 64\% were unemployed in 1975. Only about 17\% had ever been married, and an overwhelming majority were black (83\%) or Hispanic (87\%). 185 subjects received the treatment, while 260 did not.
+
+The table below also summarizes the averages of all variables among treated and non-treated groups. The samples do appear balanced in terms of age, education, race, and 1974 earnings. The other variables show slight differences between baseline means. However, given the relatively small size of the study, it is possible that these differences in means are due to randomization. 
+
+```{r}
+vars <- c("age","educ",
+                   "black","hisp",
+                   "married","nodegr",
+                   "re74","re75",
+                    "u74","u75","re78")
+
+Stat <- cbind(
+  apply(lalonde[,vars],2,mean), 
+  apply(lalonde[,vars],2,sd),
+  apply(lalonde[lalonde$treat==0,vars],2,mean),
+  apply(lalonde[lalonde$treat==1,vars],2,mean)
+)
+
+colnames(Stat)<- c("Mean", "s.d.", "Mean Controls", "Mean Treated")
+
+## Table
+Stat %>% 
+  round(.,2) %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+
+
+```{r}
+N<- nrow(lalonde)              # total sample size
+Nt<- sum(lalonde$treat==1)     # number of treated units
+Nc <- sum(lalonde$treat==0)    # number of controls
+
+cat("\nThe total sample size is ", N, 
+    "\nThe number of treated units is ", Nt,
+    "\nThe number of control units is ", Nc,
+    "\n",round((Nt/N)*100), "% of the units in the sample belongs to the treatment group",
+    sep = ""
+    )
+```
+
+
+```{r include = FALSE}
+# table(lalonde$treat, lalonde$nodegr)
+
+# table(lalonde$treat)
+# prop.table(table(lalonde$treat))
+# summary(lalonde$age[lalonde$treat==0])
+# summary(lalonde$age[lalonde$treat==1])
+```
+
+## 1.2 Data visualization
+
+We visualize the outcome variable and pre-treatment variables of interest. On visual inspection, it appears that the treatment and control groups are balanced in terms of 1975 earnings, age, and race. The earnings of the treatment group do appear to be higher in 1978. The analysis of the next sections will test the statistical significance of this difference.
+
+```{r}
+## Outcome variable - comparison of the empirical distribution
+par(mfrow=c(1,3))
+
+for(j in c(7,8,9)){
+  variable <- names(lalonde)[j]
+  year <- paste0("19", substr(variable,3,4))
+  label <- ifelse(year=="1978", paste("Outcome:\n", year, "earnings mean (log)"), paste(year, "earnings mean (log)"))
+  
+  par("mar"=c(5, 4, 4, 4))
+  boxplot(log(1+lalonde[,j])~log(1+lalonde$treat), 
+          horizontal=FALSE,
+          col = "steelblue",
+          # xlim = c(0,3), 
+          ylim = c(0,11),
+          main=label, 
+          ylab="",
+          xlab="",
+          names=c("Control","Treated")) 
+}
+```
+
+
+```{r}
+cat(
+  "\nThe percentage of people with zero income in 1974 is:",
+  "\n   - Control group:   ", 
+  round((nrow(lalonde[(lalonde$treat==0 & lalonde$re74==0),])/N)*100), "%",
+  "\n   - Treatment group: ", 
+  round((nrow(lalonde[(lalonde$treat==1 & lalonde$re74==0),])/N)*100), "%",
+  "\n\nThe percentage of people with zero income in 1975 is:",
+  "\n   - Control group:   ", 
+  round((nrow(lalonde[(lalonde$treat==0 & lalonde$re75==0),])/N)*100), "%",
+  "\n   - Treatment group: ", 
+  round((nrow(lalonde[(lalonde$treat==1 & lalonde$re75==0),])/N)*100), "%",
+  
+  "\n\n\n------------------------ Outcome ------------------------ ",
+  "\n\nThe percentage of people with zero income in 1978 is:",
+  "\n   - Control group:   ", 
+  round((nrow(lalonde[(lalonde$treat==0 & lalonde$re78==0),])/N)*100), "%",
+  "\n   - Treatment group: ", 
+  round((nrow(lalonde[(lalonde$treat==1 & lalonde$re78==0),])/N)*100), "%",
+  
+  sep = ""
+)
+```
+
+
+```{r include=FALSE}
+## Pre-treatment variables
+
+# Continuous
+# par(mfrow=c(1,2))
+# hist(lalonde$re75[lalonde$treat==0],
+#      xlab="1975 earnings", sub="(Control units)", main="")
+# hist(lalonde$re75[lalonde$treat==1],
+#      xlab="1975 earnings", sub="(Treated units)", main="")
+```
+
+
+```{r}
+# Categorical pre-treatment variables
+
+par(mfrow=c(3,2))
+for(j in c(3,4,5,6,10,11)){
+  group_perc <- c(control = mean(lalonde[lalonde$treat==0, j]),
+                  treat   = mean(lalonde[lalonde$treat==1, j]))
+  variable <- names(lalonde)[j]
+  
+  barplot(group_perc,
+          main=variable, xlim=c(0,1), ylim=c(0,2),
+          names.arg= c("No", "Yes"),
+          col = "steelblue", horiz = TRUE)
+}
+```
+
+
+```{r}
+## Continuous pre-treatment variables
+par(mfrow=c(1,2))
+for(j in c(1,2)){
+  variable <- names(lalonde)[j]
+  legend_position <- ifelse(variable == "educ", "topleft", "topright")
+  control <- lalonde[lalonde$treat==0, j]
+  treated <- lalonde[lalonde$treat==1, j]
+
+  hist(control, breaks=20,
+       main= variable,
+       xlab=variable, col="blue", density=50)
+  hist(treated, breaks=20,
+       add=TRUE, col="orange", density=30)
+  legend(legend_position, lty=c(1,1),col= c("blue", "orange"), 
+         legend=c("Control","Treated"))
+}
+```
+
+
+
+
+<br><br>
+
+# 2. Inference in Completely Randomized Experiments
+In what follows, we will consider three formal statistical procedures of causal inference for randomized experiments. 
+
+The first two are assignment-based modes of inference and are Neyman's repeated sampling approach and Fisher's exact p−value approach. In these approaches, inference is based solely on the assignment mechanism (and possibly on the sampling process). The vectors of potential outcomes $Y(0)$ and $Y(1)$ are regarded as fixed but a priori unknown quantities. As a consequence, the randomness in the observed outcome depends only on the stochastic assignment mechanism, which determines which of the two potential outcomes we observe for each unit.
+
+We will then consider a (Bayesian) model-based approach to inference. In model-based inference, the potential outcomes are considered as random variables and all the causal estimands that are obtained as functions of the potential outcomes are random as well. The problem then reduces to the imputation of the missing potential outcomes using a stochastic model for the potential outcomes. 
+The model-based imputation method is very flexible compared to the assignment-based procedures. An advantage of this method is that it allows to compute the Individual Treatment Effects (ITE), which are instead assumed to be constant in the assignment-based procedures. Also, it allows to include covariates in the analysis, which may be useful for the following reasons: 1) the assignment mechanism depends on covariates (in a known
+way), such as in block randomized experiments; 2) covariates are useful for improving the
+prediction of the missing outcomes, leading to improved efficiency of the estimators.
+Even if the choice of the model may seem arbitrary in this procedure, randomization ensures the (model-free) validity for model-based statistics, which prove to be consistent.
+
+As a methodological note, notice that the treatment variable in the dataset is the *assignment* to the job training program. This means that we have no information about the actual participation of the treated units to the program. We then proceed with an Intention-to-Treat (ITT) analysis. An ITT analysis includes all the randomized units in the groups to which they were randomly assigned, regardless of their adherence with the entry criteria, regardless of the treatment they actually received, and regardless of subsequent withdrawal from treatment or deviation from the protocol. In other words, an ITT analysis includes every subject who is randomized according to the randomized treatment assignment. It ignores noncompliance, protocol deviations, withdrawal, and anything that happens after randomization, according to the “once randomized, always analyzed” principle.
+
+
+
+<br><br>
+
+# 3. Neyman’s Estimator
+
+Our first model to estimate causal effect of the program on 1978 earnings is Neyman's estimator for the average treatment effect. The ATE is given by $\frac{1}{n}\sum_{i=1}^n\{Y_i(1)-Y_i(0)\}$. It is the average difference between the potential outcomes among all the units in the sample. In order to use this framework, we must assume the stable unit treatment value assumption (SUTVA), which requires that the potential outcomes for any unit do not vary with the treatments assigned to other units, and that for each unit there are no different forms of versions of each treatment level which could lead to different potential outcomes. As far as we know, these are reasonable assumptions for the NSW data.
+
+To implement the estimate, we simply estimate the ATE as the difference in the average outcomes between units assigned to treatment and units assigned to control. Afterward, we estimate the upper bound for the variance as $\hat{var}(\hat{ATE})= \frac{var(Y_{W=1})}{n_{treat}} + \frac{var(Y_{W=0})}{n_{control}}$. Assuming additive individual treatment effects (ITEs), we can also estimate the 95% confidence interval as $\hat{ATE} \pm z_{0.025}\sqrt{\hat{var}(\hat{ATE})}$.
+
+Our estimates give $\hat{ATE} = 1,794.34$, with a 95\% confidence interval of $(478.21,3,109.47)$. These results seem to indicate that the program did have a positive effect on earnings of up to several thousand dollars.
+
+```{r}
+# Function for computing the ATE estimator, variance and CI
+estimate_ate <- function(x,               # assignments of the treatment
+                         y,               # observed outcomes
+                         alpha = 0.05){   # confidence level for computing the confidence intervals
+  n_treat <- sum(x)
+  n_control <- sum(1-x)
+  
+  # Neyman's ATE estimator
+  ate.hat <- y%*%x/n_treat - y%*%(1-x)/n_control
+  
+  # Variance of the ATE estimator
+  var.hat.ate.hat <- var(y[x==1])/n_treat + var(y[x==0])/n_control
+  
+  # 1-alpha confidence interval for the estimate
+  z <- qnorm(1-alpha/2)
+  ate.hat.ci <- c(ate.hat - z*sqrt(var.hat.ate.hat), ate.hat + z*sqrt(var.hat.ate.hat))
+
+  list(ate.hat = ate.hat, 
+       var.hat.ate.hat = var.hat.ate.hat,
+       sd.hat.ate.hat=sqrt(var.hat.ate.hat),
+       ate.hat.ci = ate.hat.ci,
+       alpha = alpha)
+}
+```
+
+```{r}
+Neymans<-estimate_ate(lalonde$treat,lalonde$re78, alpha = 0.05)
+
+Neymans %>% 
+  unlist() %>% 
+  .[c(1,3,4,5)] %>% 
+  t() %>% 
+  round() %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+
+<br><br>
+
+# 4. Fisher's Exact Test
+
+The idea of Fisher's exact test is that inference should be based solely on the assignment mechanism. In this approach, the vectors of potential outcomes $Y(0)$ and $Y(1)$ are all fixed and randomness only comes from the assignment of the treatment, $W$.
+
+The test relies on the sharp null hypothesis that $Y_{i}(1)=Y_{i}(0), i=1,..445$. In general, the null hypothesis is an initial supposition regarding the nature of the
+treatment effect, usually specifed to test its consistency against observed
+data. A null hypothesis is said to be exact or sharp when it is sufficiently precise to allow to fill the missing potential outcome exactly. In the case of the Fisher's test, the null hypothesis states that the treatment effect for all units is precisely zero. Under this sharp null hypothesis, both potential outcomes are known for each unit in the sample, being either directly observed or imputed deterministically.
+
+
+## 4.1 Testing the sharp null hypothesis 
+
+We want to conduct two tests. The first is a one sided test, $\forall i = 1,\dots, N$:
+$$
+\begin{cases}
+H_0 :& Y_i(1)=Y_i(0) \\
+H_1: & Y_i(1)>Y_i(0)
+\end{cases}
+$$
+
+The second is a two-sided test:
+
+$$
+\begin{cases}
+H_0 :& Y_i(1)=Y_i(0) \\
+H_1: & Y_i(1)\neq Y_i(0)
+\end{cases}
+$$
+
+To test these hypothesis, we want to compute the Fisher's exact p-values, i.e. the probability of observing our observed test statistic given the sharp null over all possible assignments of treatment and control. We will calculate Fisher's exact p-value for two test statistics. The first is  $T=\bar{Y}^{observed}_{treatment}-\bar{Y}^{observed}_{control}$, which the difference of the average of the outcome for treatment group and control group, for the one-sided H1 ($ATE > 0$). The second is  $T=|\bar{Y}^{observed}_{treatment}-\bar{Y}^{observed}_{control}|$, which is for the two-sided H1 ($ATE \neq 0$). For the observed data, we calculate the value of the test statistics. 
+
+Now, under the null hypothesis, we can calculate the value of this statistic under each possible vector of treatment assignments. There are  $\binom{445}{185}=6.083152*10^{129}$ such assignments. Since enumerating every possible assignment vector becomes computationally impossible, we calculate the test statistic only for a randomly chosen subset of possible assignment vectors (10000 draws). 
+
+Then, the p−value for our test statistic is the fraction of these 10,000
+statistics that are as extreme as, or more extreme than, the observed value. We also plot the randomization distribution of the difference in average outcomes and the distribution of the absolute difference in average outcomes, with the observed differences marked in red.
+
+We reject H0: $Y_{i}(1)=Y_{i}(0)$ vs. H1:$Y_{i}(1)>Y_{i}(0)$ with p-value 0.002, and we also reject H0 VS H1:$Y_{i}(1)\neq Y_{i}(0)$ with p-value 0.003. Fisher's exact test gives strong evidence that the sharp null hypothesis is wrong, and that there is indeed a positive causal effect on earnings from the program.
+
+
+```{r}
+## Sharp null hypothesis that the treatment had no effect 
+## H0: Yi(1)=Yi(0) for i=1,...,N
+
+nass<-choose(N,Nt) # number of assignment vectors
+# we should compute the average treatment effect for each of them...
+cat("The total number of possible randomizations of the assignment vector is", nass)
+```
+
+
+```{r}
+# Absolute value of the difference in average outcomes by treatment status:
+dif.ave.obs <- mean(lalonde$re78[lalonde$treat==1]) - 
+  mean(lalonde$re78[lalonde$treat==0])
+Tobs.dif  <- abs(dif.ave.obs)
+cat(
+  "The sample difference in earnings between treated and control units is", dif.ave.obs,
+  "\nThe absolute sample difference in earnings between treated and control units is", Tobs.dif
+)
+```
+
+
+```{r}
+# We test the Sharp null against
+# i)  a one-sided alternative: H1: Yi(1)>Yi(0)
+# ii) a two-sided alternative: H1: Yi(1)!=Yi(0)
+
+# P-values estimated using 1000000 draws from the randomization distribution:
+K<- 10000 #enough!
+
+p.twosided <- p.onesided   <- 0
+Tdif.dist  <- dif.ave.dist <- NULL
+set.seed(5)
+
+for(k in 1:K){
+  w.sim <- sample(lalonde$treat, N, replace=FALSE)
+  
+  dif.ave <- mean(lalonde$re78[w.sim==1]) - mean(lalonde$re78[w.sim==0])
+  dif.ave.dist <- c(dif.ave.dist, dif.ave)
+  p.onesided <- p.onesided + 1*(dif.ave>=dif.ave.obs)
+  
+  Tdif <- abs(dif.ave)
+  Tdif.dist <- c(Tdif.dist, Tdif)
+  p.twosided <- p.twosided + 1*(Tdif>=Tobs.dif)
+}
+
+p.onesided<-p.onesided/K
+p.twosided<-p.twosided/K
+
+c(`Sample difference` = round(dif.ave.obs), 
+  `One-sided p-value` = p.onesided, 
+  `Two-sided p-value` = p.twosided) %>% 
+  t() %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+hist(dif.ave.dist, freq=FALSE, main="Randomization distribution \nof the one-sided test",
+     breaks=100,
+     xlab=expression(bar(Y)[t] - bar(Y)[c]))
+abline(v=dif.ave.obs, col="red") 
+hist(Tdif.dist, freq=FALSE, main="Randomization distribution \nof the two-sided test",
+     breaks=100,
+     xlab=expression(abs(bar(Y)[t] - bar(Y)[c])))
+abline(v=Tobs.dif, col="red") 
+
+```
+
+## 4.2 Confidence interval for the Fisher treatment effect
+We can compute the confidence intervals for the estimated treatment effect repeating Fisher's procedure under different sharp null hypotheses. In particular, we can consider $H_0∶ Y_{i}(1) = Y_{i}(0) + τ$ and construct a Fisher’s confidence interval as the set of possible values $\tau$ that correspond to a test statistics with p−values bigger than 0.05. We can interpret the resulting interval as the set of plausible values of the average causal effect.
+
+For values of $\tau$ between 600 and 3,000, we cannot reject the the null hypothesis $H_0: Y_i(1) - Y_i(0) = \tau$, i.e., the observed test statistic is not so extreme to reject the hypothesis of a treatment effect equal to $\tau$. For example, we cannot reject the hypothesis of a treatment effect equal to 3,000, but we do reject the hypothesis of treatment effect equal to 3100 since the relative p-value is less than 0.05. These results imply that the average treatment effect of the program is no more than $3,000 in earnings.
+
+
+```{r,eval=FALSE}
+# Interval estimates based on FEP (simulated p-values)
+# Fisher interval for a common additive effect
+# H0: Y(1) = Y(0) + tau
+
+#we create a sequence of tau values from 100 to 3500
+
+tau <- seq(100,3500, by=50)
+p.dif <- rep(0, length(tau))
+Tobs.dif <- NULL
+
+set.seed(5)
+for(k in 1:K){
+  w.sim <- sample(lalonde$treat, N, replace=FALSE)
+  
+  for(j in 1:length(tau)){
+    
+    #Imputed data under the null hypothesis
+    Y0 <- lalonde$re78*(lalonde$treat==0) + 
+      (lalonde$re78-tau[j])*(lalonde$treat==1)
+    Y1 <- lalonde$re78*(lalonde$treat==1) + 
+      (lalonde$re78+tau[j])*(lalonde$treat==0)
+    
+    Tobs.dif[j] <- abs(mean(lalonde$re78[lalonde$treat==1]) - 
+                         mean(lalonde$re78[lalonde$treat==0]) - tau[j])
+    
+    Tdif <- abs(mean(Y1[w.sim==1]) - mean(Y0[w.sim==0]) - tau[j])
+    p.dif[j]<- p.dif[j]+1*(Tdif>=Tobs.dif[j])
+    
+    
+  }
+  
+}
+
+p.dif<- p.dif/K
+FCI<-cbind(tau, Tobs.dif, p.dif)
+```
+
+```{r include=FALSE}
+# save(FCI, file = "FCI")
+load("FCI")
+```
+
+
+```{r eval=TRUE}
+FCI %>% 
+  as_tibble() %>% 
+  mutate(Tobs.dif = round(Tobs.dif)) %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+
+```{r,eval=TRUE}
+CI <- range(FCI[FCI[,"p.dif"] > 0.05, "tau"])
+cat(
+  "The 95% confidence interval for the estimated Fisher treatment effect is ",
+  "(", CI[1], ", ", CI[2], ")",
+  sep = ""
+)
+```
+
+
+<br><br>
+
+# 5. Bayesian Model-Based Approach
+
+The problem of estimating the treatment effect can be effectively approached as an imputation problem where one of the potential outcomes for each unit is missing. The general structure of the Bayesian model-based approach to inference is:
+
+  * Build a stochastic model for the potential outcomes (generally it
+depends on some unknown parameters)
+  * Use the observed data to learn the model parameters
+  * Draw the unknown parameters from their posterior distribution
+  * Use the model to impute the missing potential outcomes given the observed data
+  * Compute the estimand of interest based on the imputed outcomes.
+
+It is interesting to notice that each model for causal inference in the potential outcomes framework somehow assumes an imputation mechanism. For instance, the Neyman approach implicitly imputes the missing outcomes to their sample average, while the Fisher approach builds the counter-factual based on the sharp null hypothesis. The Bayesian model-based imputation approach has the advantage of explicitly accounting for the additional variability linked imputation step. Moreover, it also allows to use the additional information contained in the covariates to get the imputed values of the potential outcomes, thus making the estimators of the causal effect preciser.
+
+In this example, we assume a Bayesian linear regression model of the following form:
+
+$$
+\begin{pmatrix}
+Y_i(0) \\
+Y_i(1) 
+\end{pmatrix} \ | \ X_i, \theta
+\sim
+\mathcal{N}
+\left(
+\begin{pmatrix}
+x_i'\beta_c \\
+x_i'\beta_t  
+\end{pmatrix},
+\begin{bmatrix}
+\sigma^2_t & 0 \\
+0 & \sigma^2_t
+\end{bmatrix}
+\right)
+$$
+The model assumes a bivariate Gaussian distribution with uncorrelated components for the two potential outcomes. We implement the Markov Chain Monte Carlo (MCMC) method to estimate the parameters of the model with conjugate prior, using observed data to learn about the model parameters. The algorithm is initialized using the parameters estimated with a standard least-squares estimator. Finally, we used the posterior distributions to impute the missing data. 
+
+```{r, eval=FALSE}
+## Markov Chain Monte Carlo algorithm for sampling the posterior distribution
+mcmc_imputation <- function(
+                    niter,                ## number of MCMC iterations 
+                    nburn=NULL,           ## number of burn-in iterations (default = niter/2) 
+                    thin=1,               ## Thinning degree (default = 1)
+                    par.prior,            ## List including the parameters of the prior distributions
+                    Yobs,                 ## Observed outcome
+                    W,                    ## Observed assignments
+                    X,                    ## Observed covariates
+                    seed=NULL,            ## Optional seed for reproducibility
+                    theta.start=NULL,     ## Initial values (if null randomly drawn)
+                    save.results=FALSE){  ## logical value. If TRUE results are stored to a file
+
+  ##Setup - Dataset
+  Nc<- sum(1-W); Nt<- sum(W); N<- Nt+Nc
+  XX <- as.matrix(cbind(1,X))            ## add intercept
+  nxx<-ncol(XX)
+  
+  ##Setup - MCMC
+  if(is.null(nburn)==TRUE){
+    nburn = niter/2
+  }
+  
+  draws<- seq((nburn+1), niter, by=thin)
+  
+  if(max(draws)< niter){
+    print(paste("The number of iterations will be changed from", niter, "to",  max(draws)+thin))
+    niter<- max(draws)+thin
+    draws<- seq((nburn+1), niter, by=thin)
+  }
+  
+  ndraws<- length(draws)
+  j <- 0 ##Counter j=1...ndraws 
+  
+  ## Start values
+  if(is.null(theta.start)==TRUE){
+    ## Estimate standard OLS separatedly on the two groups
+    lm.w0<- summary(lm(Yobs[W==0]~X[W==0,]))
+    lm.w1<- summary(lm(Yobs[W==1]~X[W==1,]))
+    ## Add noise
+    theta <- list(beta.c =  as.numeric(lm.w0$coefficients[,1]) + rnorm(nxx,0, 0.1),
+                  beta.t =  as.numeric(lm.w1$coefficients[,1]) + rnorm(nxx,0, 0.1),
+                  sigma2.c =  as.numeric(lm.w0$sigma^2) + rnorm(1,0, 1),
+                  sigma2.t = as.numeric(lm.w1$sigma^2)  + rnorm(1,0, 1))
+    
+  }else{
+    theta<- theta.start
+  }
+  
+  
+  ## Initialize matrices of results 
+  
+  Theta <- matrix(NA, ndraws,  length(unlist(theta)) )
+  colnames(Theta) <- names(unlist(theta))
+  
+  Estimands<- matrix(NA, ndraws)
+  colnames(Estimands)<- c("ate")
+  
+  ##MCMC
+  if(is.null(seed)==FALSE){
+    set.seed(seed)
+  }
+  
+  for(ell in 1:niter){
+    
+    ##Update beta.c
+    Omega.c.obs  <- solve(solve(par.prior$Omega.c) + t(XX[W==0,])%*%XX[W==0,]/theta$sigma2.c)
+    nu.c.obs     <- Omega.c.obs%*%(solve(par.prior$Omega.c)%*%par.prior$nu.c +   t(XX[W==0,])%*%Yobs[W==0]/theta$sigma2.c)
+    theta$beta.c <- as.numeric(rmvnorm(1, mean= nu.c.obs, sigma=Omega.c.obs))
+    
+    ##Update beta.t
+    Omega.t.obs    <- solve(solve(par.prior$Omega.t) + t(XX[W==1,])%*%XX[W==1,]/theta$sigma2.t)
+    nu.t.obs       <- Omega.t.obs%*%(solve(par.prior$Omega.t)%*%par.prior$nu.t +   t(XX[W==1,])%*%Yobs[W==1]/theta$sigma2.t)
+    theta$beta.t   <- as.numeric(rmvnorm(1, mean= nu.t.obs, sigma=Omega.t.obs))
+    
+    ##Update sigma2.c
+    a.c.obs <- Nc + par.prior$a.c
+    b2.c.obs <-  {par.prior$a.c*par.prior$b2.c + sum({Yobs[W==0]-XX[W==0,]%*%theta$beta.c}^2)}/a.c.obs
+    theta$sigma2.c   <-  {a.c.obs*b2.c.obs}/rchisq(1, a.c.obs)
+    
+    ##Update sigma2.t
+    a.t.obs <- Nt + par.prior$a.t
+    b2.t.obs <-  {par.prior$a.t*par.prior$b2.t + sum({Yobs[W==1]-XX[W==1,]%*%theta$beta.t}^2)}/a.t.obs
+    theta$sigma2.t   <-  {a.t.obs*b2.t.obs}/rchisq(1, a.t.obs)      
+    
+    rm(Omega.c.obs, nu.c.obs, Omega.t.obs, nu.t.obs,  a.c.obs, b2.c.obs, a.t.obs, b2.t.obs)
+    
+    if(sum(ell == draws)==1){
+      j <- j+1
+      
+      Theta[j,]<- unlist(theta)
+      
+      ## FINITE SAMPLE ATE
+      ## Impute the missing potential outcomes using Ymis | Yobs, W, X, theta
+      Y0<-Y1<-NULL
+      
+      Y0[W==0]<- Yobs[W==0]
+      Y0[W==1]<- rnorm(Nt, XX[W==1,]%*%theta$beta.c, sqrt(theta$sigma2.c))
+      
+      Y1[W==0]<- rnorm(Nc, XX[W==0,]%*%theta$beta.t, sqrt(theta$sigma2.t)) 
+      Y1[W==1]<- Yobs[W==1]
+      
+      Estimands[j,"ate"] <- mean(Y1)-mean(Y0)
+      
+      
+    }
+    
+  }##End loop over ell
+  
+  if(save.results==TRUE){
+    model4<-list(Theta=Theta, Estimands=Estimands)
+    save(model4, file="Results/MCMC_results.RData")
+  }
+  
+  return(list(Theta=Theta, Estimands=Estimands))
+  
+}##End function
+```
+
+```{r, eval=FALSE}
+X <- as.matrix(lalonde[, c("age", "educ","married", "nodegr", "black", "re74", "u74","re75", "u75")])
+ncov <- ncol(X)
+par.prior <- list(nu.c=rep(0, {ncov+1}), 
+                  Omega.c=diag(100^2,{ncov+1}), 
+                  nu.t=rep(0, {ncov+1}), Omega.t=diag(100^2,{ncov+1}),
+                  a.c=2, b2.c=0.01, a.t=2, b2.t=0.01)
+
+chain_imputation <- mcmc_imputation(niter = 25000, nburn = 5000, thin = 1, par.prior, 
+                    Yobs = lalonde$re78, 
+                    W = lalonde$treat, 
+                    X = X, 
+                    seed = 123, theta.start=NULL, save.results=TRUE)
+```
+
+```{r include = FALSE}
+# save(chain_imputation, file = "chain_imputation")
+load("chain_imputation")
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+cbind(mean = mean(chain_imputation$Estimands),
+      std.dev = sd(chain_imputation$Estimands),
+      t(quantile(chain_imputation$Estimands,probs=c(0.025, 0.975)))) %>% 
+  round() %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+
+
+<br><br>
+
+# 6. Discussion
+
+Now, we present the results for 3 models that we implemented. Specifically, we compare the ATE estimates, their corresponding standard deviations, and the 95% confidence interval across these models. For the Fisher exact method, we could only estimate the confidence interval. Our results indicate that the ATE estimates are fairly consistent across all models. The treatment appears to have had a positive causal effect on earnings of between 500 and 3,000 dollars. The model-based approach appears to be the best model, as it yields smaller variance and narrower 95% confidence intervals. Additional work could also consist in testing different specifications for the model-based imputations in order to get even more accurate estimates.
+
+
+```{r}
+results <- data.frame(
+  Estimator = c("Neyman", "Fisher Exact P-Values", "Model-Based Approach"),
+  ATE = c(Neymans$ate.hat, NA, mean(chain_imputation$Estimands)),  
+  SD = c(Neymans$sd.hat.ate.hat, NA, sd(chain_imputation$Estimands)),   
+  LB = c(Neymans$ate.hat.ci[1], 600, quantile(chain_imputation$Estimands,probs=0.025)),
+  UB = c(Neymans$ate.hat.ci[2],3000,quantile(chain_imputation$Estimands,probs=0.975))
+)
+```
+
+
+```{r}
+results[,2:5] <- round(results[,2:5])
+results %>% 
+  kable() %>% 
+  kable_classic()
+```
+
+There were several limitations to the data and approaches that were used. Given that the treatment of the job training program was randomized among applicants, the estimators employed should be consistent for the true ATE. However, because of the sample size, the estimate may be incorrect simply due to chance. For example, comparisons of the baseline covariates indicate that the treatment group had higher average earnings in 1974 and 1975, lower unemployment rate in those years, and a higher rate of high school graduation. This indicates that the estimated ATE might be overestimating the effect of the program on earnings, since the treated group had higher earnings, employment, and education to begin with. 
+
+If this is true that we are overestimating the ATE due to a (intended or unintended) selection effect, one way to deal with the data is to try to match treated and untreated units based on propensity scores and re-estimate the ATE. We could also employ a graphical modeling approach to the data as if it were an observational study and use Pearl's do-calculus to calculate upper and lower bounds for the effect of the intervention (the job-training program). These estimates could give us a lower bound for the ATE to compare to those estimated in the random experiment approach. 
